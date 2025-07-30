@@ -1,0 +1,6 @@
+{
+  "name": "Dashboard Legislativo",
+  "description": "Um painel para visualizar e categorizar indicações legislativas da Câmara Municipal de Bento Gonçalves, usando IA para categorizar propostas de infraestrutura urbana, meio ambiente, mobilidade e serviços públicos.",
+  "requestFramePermissions": [],
+  "prompt": ""
+}
