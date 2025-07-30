@@ -15,6 +15,32 @@ function getCategoryFromSummary(summary: string): Category {
     return Category.UrbanInfrastructure;
 }
 
+// Helper robusto para extrair localização
+const extractLocationDetails = (summary: string): { address: string; neighborhood?: string } => {
+    const s = summary;
+    
+    // Tenta encontrar um endereço mais explícito
+    const addressRegex = /(?:Rua|rua|Avenida|avenida|Travessa|travessa)\s+[\w\s\d.-]+/i;
+    let addressMatch = s.match(addressRegex);
+    let address = addressMatch ? addressMatch[0].trim() : s.split(',')[0].trim();
+
+    // Tenta encontrar o bairro
+    const neighborhoodRegex = /(?:bairro|no bairro|localidade de)\s+([\w\s'-]+)/i;
+    let neighborhoodMatch = s.match(neighborhoodRegex);
+    let neighborhood = neighborhoodMatch ? neighborhoodMatch[1].replace(/[,.]$/, '').trim() : undefined;
+
+    // Remove a informação do bairro do endereço principal, se estiver lá
+    if (neighborhood && address.toLowerCase().includes(neighborhood.toLowerCase())) {
+        address = address.replace(new RegExp(`,?\\s*(?:bairro|no bairro)\\s+${neighborhood}`, 'i'), '').trim();
+    }
+    
+    if (address.endsWith(',')) {
+        address = address.slice(0, -1).trim();
+    }
+
+    return { address, neighborhood };
+}
+
 async function scrapeUrl(url: string): Promise<LegislativeMatter[]> {
     const matters: LegislativeMatter[] = [];
     try {
@@ -36,7 +62,7 @@ async function scrapeUrl(url: string): Promise<LegislativeMatter[]> {
             const columns = $(elem).find('td');
             if (columns.length > 3) {
                 const idText = $(columns[0]).find('a').text().trim();
-                if (!idText) return; // Pular linhas vazias
+                if (!idText) return; // Pular linhas vazias ou de cabeçalho sem link
 
                 const pdfLink = $(columns[0]).find('a').attr('href') || '';
                 const summary = $(columns[1]).text().trim();
@@ -45,8 +71,7 @@ async function scrapeUrl(url: string): Promise<LegislativeMatter[]> {
                 const protocolMatch = pdfLink.match(/protocolo=(\d+)/);
                 const protocol = protocolMatch ? protocolMatch[1] : 'N/A';
                 
-                const neighborhoodMatch = summary.match(/(?:bairro|no|na)\s+([\w\s-]+)/i);
-                const neighborhood = neighborhoodMatch ? neighborhoodMatch[1].replace(/[,.]$/, '').trim() : undefined;
+                const location = extractLocationDetails(summary);
                 
                 const matter: LegislativeMatter = {
                     id: idText,
@@ -54,10 +79,7 @@ async function scrapeUrl(url: string): Promise<LegislativeMatter[]> {
                     author: author,
                     presentationDate: presentationDate,
                     category: getCategoryFromSummary(summary),
-                    location: {
-                        address: summary.split(',')[0], // Extração simples de endereço
-                        neighborhood: neighborhood,
-                    },
+                    location: location,
                     status: 'Disponível no SAPL',
                     protocol: protocol,
                     pdfLink: pdfLink.startsWith('http') ? pdfLink : `https://sapl.camarabento.rs.gov.br${pdfLink}`,
@@ -70,6 +92,27 @@ async function scrapeUrl(url: string): Promise<LegislativeMatter[]> {
     }
     return matters;
 }
+
+// Helper robusto para extrair o número e ano do ID
+const parseId = (id: string): { num: number; year: number } => {
+    try {
+        if (!id || typeof id !== 'string') return { num: 0, year: 0 };
+        
+        const parts = id.split(' ');
+        if (parts.length < 2) return { num: 0, year: 0 };
+        
+        const numberParts = parts[parts.length - 1].split('/');
+        if (numberParts.length < 2) return { num: 0, year: 0 };
+
+        const num = parseInt(numberParts[0], 10);
+        const year = parseInt(numberParts[1], 10);
+
+        return { num: isNaN(num) ? 0 : num, year: isNaN(year) ? 0 : year };
+    } catch (e) {
+        console.error(`Erro ao parsear o ID: "${id}"`, e);
+        return { num: 0, year: 0 };
+    }
+};
 
 export default async function handler(
   req: VercelRequest,
@@ -89,18 +132,15 @@ export default async function handler(
       return res.status(503).json({ message: "Não foi possível extrair dados do portal da câmara. O site pode estar temporariamente indisponível ou bloqueando o acesso." });
     }
 
-    // Remover duplicatas e ordenar
     const uniqueMatters = Array.from(new Map(combinedMatters.map(item => [item.id, item])).values());
-     uniqueMatters.sort((a, b) => {
-        const [, idPartA] = a.id.split(' ');
-        const [numA, yearA] = idPartA.split('/').map(Number);
-        const [, idPartB] = b.id.split(' ');
-        const [numB, yearB] = idPartB.split('/').map(Number);
-        if (yearA !== yearB) return yearB - yearA;
-        return numB - numA;
+     
+    uniqueMatters.sort((a, b) => {
+        const idA = parseId(a.id);
+        const idB = parseId(b.id);
+        if (idA.year !== idB.year) return idB.year - idA.year;
+        return idB.num - idA.num;
     });
 
-    // Cache por 12 horas para não sobrecarregar o servidor da câmara
     res.setHeader('Cache-Control', 's-maxage=43200, stale-while-revalidate=3600');
     res.status(200).json(uniqueMatters);
   } catch (error: any) {
